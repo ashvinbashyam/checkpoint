@@ -19,32 +19,15 @@ QUANTITY_TRADE_COL = "Notional Quantity"  # Used in trade data
 QUANTITY_POS_COL = "Quantity"  # Used in position data
 TXN_TYPE_COL = 'Txn Type'  # Used in trade data
 
-def find_portfolio_file():
-    """Search for the portfolio history file in multiple directories."""
-    # Define directories to search
-    search_paths = [
-        os.path.expanduser("~/Downloads"),
-        r"Z:\Shared\Internal\Biotech"
-    ]
 
-    # File pattern to search for
-    portfolio_pattern = "Checkpoint Daily Portfolio History*.xlsx"
-
-    for path in search_paths:
-        # Generate full path with pattern
-        full_pattern = os.path.join(path, portfolio_pattern)
-        portfolio_files = glob.glob(full_pattern)
-        if portfolio_files:
-            return portfolio_files[0]  # Return the first match found
-
-    # Return None if no files are found
-    return None
-
-def load_data(portfolio_history_path):
+def load_data(portfolio_history_content):
     """Load and process the consolidated Excel file into DataFrames."""
+    # Load Excel data directly from bytes
+    excel_file = pd.ExcelFile(portfolio_history_content)
+
     # Load Trade Blotter from ITD Trade Blotter sheet
     trade_df = pd.read_excel(
-        portfolio_history_path,
+        excel_file,
         sheet_name="ITD Trade Blotter",
         keep_default_na=True
     )
@@ -52,11 +35,11 @@ def load_data(portfolio_history_path):
     
     # Load Position History from ITD History Portfolio sheet
     position_df = pd.read_excel(
-        portfolio_history_path,
+        excel_file,
         sheet_name="ITD History Portfolio",
         keep_default_na=True,
         na_values=['#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan',
-                  '1.#IND', '1.#QNAN', 'N/A', 'NULL', 'NaN', 'n/a', 'nan', 'null']
+                   '1.#IND', '1.#QNAN', 'N/A', 'NULL', 'NaN', 'n/a', 'nan', 'null']
     )
     position_df[POSITION_DATE_COL] = pd.to_datetime(position_df[POSITION_DATE_COL]).dt.normalize()
     
@@ -78,18 +61,16 @@ def find_or_upload_portfolio_file():
         full_pattern = os.path.join(path, portfolio_pattern)
         portfolio_files = glob.glob(full_pattern)
         if portfolio_files:
-            return portfolio_files[0]  # Return the first match found
+            # Open the file and return its content as bytes
+            with open(portfolio_files[0], "rb") as f:
+                return f.read()  # Read file content into memory as bytes
 
     # If no files found, prompt user to upload
     st.warning("Required file not found in default directories!")
     uploaded_file = st.file_uploader("Please upload the Checkpoint Daily Portfolio History file", type=["xlsx"])
     
     if uploaded_file is not None:
-        # Save the uploaded file temporarily
-        temp_path = os.path.join(os.getcwd(), "temp_portfolio_file.xlsx")
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        return temp_path  # Return path to the temporary file
+        return uploaded_file.getvalue()  # Return the file content as bytes
 
     return None
 
@@ -290,14 +271,14 @@ def init_session_state():
 
 def load_initial_data():
     """Load data and compute metrics from the consolidated file."""
-    portfolio_history_path = find_or_upload_portfolio_file()
+    portfolio_history_content = find_or_upload_portfolio_file()
     
-    if not portfolio_history_path:
+    if not portfolio_history_content:
         st.error("No portfolio file provided! Please upload a valid file to proceed.")
         return False
     
     with st.spinner("Loading data..."):
-        trade_df, position_df = load_data(portfolio_history_path)
+        trade_df, position_df = load_data(portfolio_history_content)
         st.session_state.computed_fields = compute_portfolio_metrics(trade_df, position_df)
         st.session_state.min_date = st.session_state.computed_fields.index.min()
         st.session_state.max_date = st.session_state.computed_fields.index.max()
