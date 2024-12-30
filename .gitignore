@@ -5,3 +5,5 @@ myenv/
 .env/
 .venv/
 env/
+*.xlsx
+.xlsx
