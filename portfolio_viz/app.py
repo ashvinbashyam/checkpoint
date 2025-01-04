@@ -19,21 +19,45 @@ QUANTITY_TRADE_COL = "Notional Quantity"  # Used in trade data
 QUANTITY_POS_COL = "Quantity"  # Used in position data
 TXN_TYPE_COL = 'Txn Type'  # Used in trade data
 
+def validate_excel_structure(excel_file):
+    """Validate that the Excel file has the required sheets."""
+    required_sheets = ["ITD Trade Blotter", "ITD History Portfolio"]
+    actual_sheets = excel_file.sheet_names
+    
+    missing_sheets = [sheet for sheet in required_sheets if sheet not in actual_sheets]
+    if missing_sheets:
+        raise ValueError(f"Missing required sheets: {missing_sheets}")
+
+def validate_sheet_columns(df, required_columns, sheet_name):
+    """Validate that the DataFrame has all required columns."""
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns in {sheet_name}: {missing_columns}")
 
 def load_data(portfolio_history_content):
     """Load and process the consolidated Excel file into DataFrames."""
-    # Load Excel data directly from bytes
+    # Load Excel data
     excel_file = pd.ExcelFile(portfolio_history_content)
-
-    # Load Trade Blotter from ITD Trade Blotter sheet
+    
+    # Validate Excel structure
+    validate_excel_structure(excel_file)
+    
+    # Define required columns
+    trade_columns = [TRADE_DATE_COL, TICKER_COL, DESCRIPTION_COL, 
+                    QUANTITY_TRADE_COL, TXN_TYPE_COL]
+    position_columns = [POSITION_DATE_COL, TICKER_COL, DESCRIPTION_COL,
+                       NMV_COL, PRICE_COL, COST_COL, QUANTITY_POS_COL]
+    
+    # Load Trade Blotter
     trade_df = pd.read_excel(
         excel_file,
         sheet_name="ITD Trade Blotter",
         keep_default_na=True
     )
+    validate_sheet_columns(trade_df, trade_columns, "ITD Trade Blotter")
     trade_df[TRADE_DATE_COL] = pd.to_datetime(trade_df[TRADE_DATE_COL]).dt.normalize()
     
-    # Load Position History from ITD History Portfolio sheet
+    # Load Position History
     position_df = pd.read_excel(
         excel_file,
         sheet_name="ITD History Portfolio",
@@ -41,6 +65,7 @@ def load_data(portfolio_history_content):
         na_values=['#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan',
                    '1.#IND', '1.#QNAN', 'N/A', 'NULL', 'NaN', 'n/a', 'nan', 'null']
     )
+    validate_sheet_columns(position_df, position_columns, "ITD History Portfolio")
     position_df[POSITION_DATE_COL] = pd.to_datetime(position_df[POSITION_DATE_COL]).dt.normalize()
     
     return trade_df, position_df
@@ -73,7 +98,6 @@ def find_or_upload_portfolio_file():
         return uploaded_file.getvalue()  # Return the file content as bytes
 
     return None
-
 
 def process_ticker_data(position_df, trade_df, ticker, dates):
     """Process data for a single ticker."""
@@ -173,9 +197,15 @@ def create_stock_chart(computedFields, ticker, date_range):
         )
         
         max_marker_size = 40
-        size_scale = max_marker_size / max_trade_size if max_trade_size > 0 else 0
+        # Calculate area scaling factor to make areas proportional
+        # If we want the largest trade to have area π(max_marker_size/2)^2,
+        # and we want area proportional to trade size,
+        # then we need the radius (size/2) to be proportional to sqrt(trade_size)
+        area_scale = max_marker_size / (2 * np.sqrt(max_trade_size)) if max_trade_size > 0 else 0
         
         if not buys.empty:
+            # Calculate marker sizes where area is proportional to trade size
+            buy_sizes = 2 * area_scale * np.sqrt(buys)
             fig.add_trace(
                 go.Scatter(
                     x=buys.index,
@@ -184,7 +214,7 @@ def create_stock_chart(computedFields, ticker, date_range):
                     name='Buy',
                     marker=dict(
                         color='green',
-                        size=buys * size_scale,
+                        size=buy_sizes,
                         opacity=0.4
                     ),
                     text=buys,  # Include buy sizes in hover information
@@ -194,6 +224,8 @@ def create_stock_chart(computedFields, ticker, date_range):
             )
         
         if not sells.empty:
+            # Calculate marker sizes where area is proportional to trade size
+            sell_sizes = 2 * area_scale * np.sqrt(sells)
             fig.add_trace(
                 go.Scatter(
                     x=sells.index,
@@ -202,7 +234,7 @@ def create_stock_chart(computedFields, ticker, date_range):
                     name='Sell',
                     marker=dict(
                         color='red',
-                        size=abs(sells) * size_scale,
+                        size=sell_sizes,
                         opacity=0.4
                     ),
                     text=abs(sells),  # Include sell sizes in hover information
@@ -228,7 +260,7 @@ def create_stock_chart(computedFields, ticker, date_range):
         yaxis_title='Price ($)',
         yaxis2_title='Shares Owned',
         hovermode='x unified',
-        autosize=True,  # Allow Plotly to dynamically adjust the height based on the container
+        autosize=True,
         height=900
     )
     
@@ -253,7 +285,7 @@ def create_portfolio_chart(computedFields, date_range):
         xaxis_title='Date',
         yaxis_title='Value ($)',
         hovermode='x unified',
-        autosize=True,  # Allow Plotly to dynamically adjust the height based on the container
+        autosize=True,
         height=900
     )
     
@@ -271,23 +303,35 @@ def init_session_state():
 
 def load_initial_data():
     """Load data and compute metrics from the consolidated file."""
-    portfolio_history_content = find_or_upload_portfolio_file()
-    
-    if not portfolio_history_content:
-        st.error("No portfolio file provided! Please upload a valid file to proceed.")
+    try:
+        portfolio_history_content = find_or_upload_portfolio_file()
+        
+        if not portfolio_history_content:
+            st.error("No portfolio file provided! Please upload a valid file to proceed.")
+            return False
+        
+        with st.spinner("Loading data..."):
+            try:
+                trade_df, position_df = load_data(portfolio_history_content)
+                st.session_state.computed_fields = compute_portfolio_metrics(trade_df, position_df)
+                st.session_state.min_date = st.session_state.computed_fields.index.min()
+                st.session_state.max_date = st.session_state.computed_fields.index.max()
+                st.session_state.tickers = [t for t in position_df[TICKER_COL].unique() if t != 'USD']
+                st.session_state.initialized = True
+            except ValueError as e:
+                st.error(f"Error loading file: {str(e)}")
+                return False
+            except Exception as e:
+                st.error(f"Unexpected error: {str(e)}")
+                return False
+        
+        return True
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
         return False
-    
-    with st.spinner("Loading data..."):
-        trade_df, position_df = load_data(portfolio_history_content)
-        st.session_state.computed_fields = compute_portfolio_metrics(trade_df, position_df)
-        st.session_state.min_date = st.session_state.computed_fields.index.min()
-        st.session_state.max_date = st.session_state.computed_fields.index.max()
-        st.session_state.tickers = [t for t in position_df[TICKER_COL].unique() if t != 'USD']
-        st.session_state.initialized = True
-    
-    return True
 
 def main():
+    """Main application entry point."""
     st.set_page_config(page_title="Portfolio Visualization Tool", layout="wide")
     
     init_session_state()
@@ -305,13 +349,12 @@ def main():
         min_date = st.session_state.min_date.date()
         max_date = st.session_state.max_date.date()
         
-        # Use datetime.date objects for the slider
         selected_dates = st.slider(
             "Select Date Range",
             min_value=min_date,
             max_value=max_date,
             value=(min_date, max_date),
-            format="YYYY-MM-DD",  # Ensure date format
+            format="YYYY-MM-DD",
             key="portfolio_date_slider"
         )
         
@@ -323,31 +366,53 @@ def main():
     else:  # Stock 1
         st.title("Stock Analysis")
         
-        ticker = st.text_input("Enter Ticker", 
-                            value=st.session_state.tickers[0] if st.session_state.tickers else "")
+        # Check if we have tickers available
+        if not st.session_state.tickers:
+            st.error("No ticker data available. Please ensure the portfolio file is loaded correctly.")
+            return
+            
+        # Get default ticker safely
+        default_ticker = str(st.session_state.tickers[0]) if st.session_state.tickers else ""
         
-        ticker_upper = ticker.upper()
-        if ticker_upper in [t.upper() for t in st.session_state.tickers]:
-            ticker = next(t for t in st.session_state.tickers if t.upper() == ticker_upper)
+        ticker = st.text_input("Enter Ticker", value=default_ticker)
+        
+        if not ticker:
+            st.warning("Please enter a ticker symbol")
+            return
             
-            min_date = st.session_state.min_date.date()
-            max_date = st.session_state.max_date.date()
+        # Ensure ticker is a string and handle case-insensitive comparison
+        try:
+            ticker_upper = str(ticker).upper()
+            available_tickers = [str(t).upper() for t in st.session_state.tickers if pd.notna(t)]
             
-            selected_dates = st.slider(
-                "Select Date Range",
-                min_value=min_date,
-                max_value=max_date,
-                value=(min_date, max_date),
-                format="YYYY-MM-DD",
-                key="stock_date_slider"
-            )
-            
-            start_date, end_date = selected_dates
-            
-            fig = create_stock_chart(st.session_state.computed_fields, ticker, (start_date, end_date))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Please enter a valid ticker symbol")
-
+            if ticker_upper in available_tickers:
+                # Get the original case-sensitive ticker
+                original_idx = [str(t).upper() for t in st.session_state.tickers].index(ticker_upper)
+                ticker = str(st.session_state.tickers[original_idx])
+                
+                min_date = st.session_state.min_date.date()
+                max_date = st.session_state.max_date.date()
+                
+                selected_dates = st.slider(
+                    "Select Date Range",
+                    min_value=min_date,
+                    max_value=max_date,
+                    value=(min_date, max_date),
+                    format="YYYY-MM-DD",
+                    key="stock_date_slider"
+                )
+                
+                start_date, end_date = selected_dates
+                
+                try:
+                    fig = create_stock_chart(st.session_state.computed_fields, ticker, (start_date, end_date))
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error creating chart for {ticker}: {str(e)}")
+            else:
+                st.warning(f"Invalid ticker. Available tickers: {', '.join(str(t) for t in st.session_state.tickers if pd.notna(t))}")
+        except Exception as e:
+            st.error(f"Error processing ticker {ticker}: {str(e)}")
+                    
 if __name__ == "__main__":
     main()
