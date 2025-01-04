@@ -136,7 +136,7 @@ def compute_portfolio_metrics(trade_df, position_df):
     portfolio_value = position_df.groupby(POSITION_DATE_COL)[NMV_COL].sum()
     result['Portfolio_Value'] = portfolio_value
     
-    tickers = [t for t in position_df[TICKER_COL].unique() if t != 'USD']
+    tickers = [t for t in position_df[TICKER_COL].unique() if pd.notna(t) and t != 'USD']
     all_ticker_data = []
     
     for ticker in tickers:
@@ -149,21 +149,63 @@ def compute_portfolio_metrics(trade_df, position_df):
     return result
 
 def create_stock_chart(computedFields, ticker, date_range):
-    """Create stock-specific chart with price, trades, and shares owned."""
+    """Create stock-specific chart with price, trades, and shares owned.
+    
+    Args:
+        computedFields: DataFrame containing all computed metrics
+        ticker: String representing the stock ticker
+        date_range: Tuple of (start_date, end_date)
+        
+    Returns:
+        plotly.graph_objects.Figure object
+    """
+    def add_trade_markers(trades, trade_type, max_trade_size, color):
+        """Add trade markers to the figure.
+        
+        Args:
+            trades: Series of trade sizes
+            trade_type: 'Buy' or 'Sell'
+            max_trade_size: Maximum trade size for scaling
+            color: Color for the markers
+        """
+        if trades.empty:
+            return
+            
+        max_marker_size = 40
+        area_scale = max_marker_size / (2 * np.sqrt(max_trade_size))
+        marker_sizes = 2 * area_scale * np.sqrt(abs(trades))
+        
+        fig.add_trace(
+            go.Scatter(
+                x=trades.index,
+                y=filtered_data.loc[trades.index, f'{ticker}_Price'],
+                mode='markers',
+                name=trade_type,
+                marker=dict(
+                    color=color,
+                    size=marker_sizes,
+                    opacity=0.4,
+                    symbol='circle'
+                ),
+                text=[f"{abs(size):,.0f} shares" for size in trades],
+                hovertemplate=(
+                    f'<b>{trade_type}</b><br>'
+                    'Shares: %{text}<br>'
+                    'Price: $%{y:.2f}<br>'
+                    'Date: %{x}<extra></extra>'
+                )
+            ),
+            secondary_y=False
+        )
+
+    # Filter data to selected date range
     filtered_data = computedFields[date_range[0]:date_range[1]]
     
+    # Create figure with secondary y-axis
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
+    # Add price line
     price_data = filtered_data[f'{ticker}_Price']
-    y_min = price_data.min()
-    y_max = price_data.max()
-    y_range = y_max - y_min
-    
-    y_margin = y_range * 0.1
-    y_min -= y_margin
-    y_max += y_margin
-    y_min = 0
-    
     fig.add_trace(
         go.Scatter(
             x=filtered_data.index,
@@ -175,6 +217,7 @@ def create_stock_chart(computedFields, ticker, date_range):
         secondary_y=False
     )
     
+    # Add cost basis line
     fig.add_trace(
         go.Scatter(
             x=filtered_data.index,
@@ -186,63 +229,27 @@ def create_stock_chart(computedFields, ticker, date_range):
         secondary_y=False
     )
     
+    # Process trade markers
     trade_data = filtered_data[f'{ticker}_TradeQuantity']
     if not trade_data.empty:
-        buys = trade_data[trade_data > 0]
-        sells = trade_data[trade_data < 0]
-        
-        max_trade_size = max(
-            buys.max() if not buys.empty else 0,
-            abs(sells.min()) if not sells.empty else 0
-        )
-        
-        max_marker_size = 40
-        # Calculate area scaling factor to make areas proportional
-        # If we want the largest trade to have area π(max_marker_size/2)^2,
-        # and we want area proportional to trade size,
-        # then we need the radius (size/2) to be proportional to sqrt(trade_size)
-        area_scale = max_marker_size / (2 * np.sqrt(max_trade_size)) if max_trade_size > 0 else 0
-        
-        if not buys.empty:
-            # Calculate marker sizes where area is proportional to trade size
-            buy_sizes = 2 * area_scale * np.sqrt(buys)
-            fig.add_trace(
-                go.Scatter(
-                    x=buys.index,
-                    y=filtered_data.loc[buys.index, f'{ticker}_Price'],
-                    mode='markers',
-                    name='Buy',
-                    marker=dict(
-                        color='green',
-                        size=buy_sizes,
-                        opacity=0.4
-                    ),
-                    text=buys,  # Include buy sizes in hover information
-                    hovertemplate='<b>Buy</b><br>Shares: %{text}<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>'
-                ),
-                secondary_y=False
+        # Filter to valid trades and split into buys/sells
+        valid_trades = trade_data[pd.notna(trade_data)]
+        if not valid_trades.empty:
+            buys = valid_trades[valid_trades > 0]
+            sells = valid_trades[valid_trades < 0]
+            
+            # Calculate max trade size for consistent marker scaling
+            max_trade_size = max(
+                buys.max() if not buys.empty else 0,
+                abs(sells.min()) if not sells.empty else 0
             )
-        
-        if not sells.empty:
-            # Calculate marker sizes where area is proportional to trade size
-            sell_sizes = 2 * area_scale * np.sqrt(sells)
-            fig.add_trace(
-                go.Scatter(
-                    x=sells.index,
-                    y=filtered_data.loc[sells.index, f'{ticker}_Price'],
-                    mode='markers',
-                    name='Sell',
-                    marker=dict(
-                        color='red',
-                        size=sell_sizes,
-                        opacity=0.4
-                    ),
-                    text=abs(sells),  # Include sell sizes in hover information
-                    hovertemplate='<b>Sell</b><br>Shares: %{text}<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>'
-                ),
-                secondary_y=False
-            )
+            
+            if max_trade_size > 0:
+                # Add markers for both buys and sells
+                add_trade_markers(buys, 'Buy', max_trade_size, 'green')
+                add_trade_markers(sells, 'Sell', max_trade_size, 'red')
     
+    # Add shares owned line
     fig.add_trace(
         go.Scatter(
             x=filtered_data.index,
@@ -254,6 +261,13 @@ def create_stock_chart(computedFields, ticker, date_range):
         secondary_y=True
     )
     
+    # Calculate y-axis range with margin
+    y_min = price_data.min()
+    y_max = price_data.max()
+    y_range = y_max - y_min
+    y_margin = y_range * 0.1
+    
+    # Update layout
     fig.update_layout(
         title=f'{ticker}',
         xaxis_title='Date',
@@ -261,7 +275,8 @@ def create_stock_chart(computedFields, ticker, date_range):
         yaxis2_title='Shares Owned',
         hovermode='x unified',
         autosize=True,
-        height=900
+        height=900,
+        yaxis=dict(range=[max(0, y_min - y_margin), y_max + y_margin])
     )
     
     return fig
@@ -382,13 +397,15 @@ def main():
             
         # Ensure ticker is a string and handle case-insensitive comparison
         try:
-            ticker_upper = str(ticker).upper()
-            available_tickers = [str(t).upper() for t in st.session_state.tickers if pd.notna(t)]
+            # Convert input ticker to uppercase for comparison
+            ticker_upper = str(ticker).upper() if pd.notna(ticker) else ""
             
-            if ticker_upper in available_tickers:
+            # Create a dictionary mapping uppercase tickers to original tickers
+            ticker_map = {str(t).upper(): t for t in st.session_state.tickers}
+            
+            if ticker_upper in ticker_map:
                 # Get the original case-sensitive ticker
-                original_idx = [str(t).upper() for t in st.session_state.tickers].index(ticker_upper)
-                ticker = str(st.session_state.tickers[original_idx])
+                ticker = ticker_map[ticker_upper]
                 
                 min_date = st.session_state.min_date.date()
                 max_date = st.session_state.max_date.date()
