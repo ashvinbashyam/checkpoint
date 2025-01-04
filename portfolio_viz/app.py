@@ -18,6 +18,8 @@ COST_COL = "$ Average Cost"  # Used in position data
 QUANTITY_TRADE_COL = "Notional Quantity"  # Used in trade data
 QUANTITY_POS_COL = "Quantity"  # Used in position data
 TXN_TYPE_COL = 'Txn Type'  # Used in trade data
+DAILY_PNL_COL = '$ Daily P&L'  # Add this with other constants at the top
+
 
 def validate_excel_structure(excel_file):
     """Validate that the Excel file has the required sheets."""
@@ -109,10 +111,26 @@ def process_ticker_data(position_df, trade_df, ticker, dates):
         result[f'{ticker}_Price'] = position_grouped[PRICE_COL]
         result[f'{ticker}_AvgCostBasis'] = position_grouped[COST_COL]
         result[f'{ticker}_SharesOwned'] = position_grouped[QUANTITY_POS_COL]
+        
+        # Add Daily P&L processing
+        # Fill NaN values with 0 for dates without trading activity
+        result[f'{ticker}_DailyPnL'] = position_grouped[DAILY_PNL_COL].fillna(0)
+        
+        # Calculate cumulative P&L
+        # Find first non-zero P&L date
+        first_pnl_date = result[result[f'{ticker}_DailyPnL'] != 0].index.min()
+        if pd.notna(first_pnl_date):
+            # Calculate cumulative sum starting from first non-zero date
+            result[f'{ticker}_CumulativePnL'] = result.loc[first_pnl_date:, f'{ticker}_DailyPnL'].cumsum()
+        else:
+            result[f'{ticker}_CumulativePnL'] = 0
+
     else:
         result[f'{ticker}_Price'] = np.nan
         result[f'{ticker}_AvgCostBasis'] = np.nan
         result[f'{ticker}_SharesOwned'] = np.nan
+        result[f'{ticker}_DailyPnL'] = 0
+        result[f'{ticker}_CumulativePnL'] = 0
     
     result[f'{ticker}_TradeQuantity'] = 0.0
     ticker_trades = trade_df[trade_df[TICKER_COL] == ticker].copy()
@@ -275,8 +293,145 @@ def create_stock_chart(computedFields, ticker, date_range):
         yaxis2_title='Shares Owned',
         hovermode='x unified',
         autosize=True,
-        height=900,
+        height=600,
         yaxis=dict(range=[max(0, y_min - y_margin), y_max + y_margin])
+    )
+    
+    return fig
+
+def create_pnl_chart(computedFields, ticker, date_range):
+    """Create P&L chart with stock price, cumulative P&L, and scaled share bars.
+    
+    Args:
+        computedFields: DataFrame containing all computed metrics
+        ticker: String representing the stock ticker
+        date_range: Tuple of (start_date, end_date)
+        
+    Returns:
+        plotly.graph_objects.Figure object
+    """
+    # Filter data to selected date range
+    filtered_data = computedFields[date_range[0]:date_range[1]]
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Get price data and calculate y-axis range first
+    price_data = filtered_data[f'{ticker}_Price']
+    shares_data = filtered_data[f'{ticker}_SharesOwned']
+    
+    # Calculate y-axis range with margin for price axis
+    y_min = min(
+        price_data.min(),
+        filtered_data[f'{ticker}_AvgCostBasis'].min()
+    )
+    y_max = max(
+        price_data.max(),
+        filtered_data[f'{ticker}_AvgCostBasis'].max()
+    )
+    y_range = y_max - y_min
+    y_margin = y_range * 0.1
+    
+    # Adjust y_min and y_max with margin
+    y_min_with_margin = max(0, y_min - y_margin)
+    y_max_with_margin = y_max + y_margin
+    
+    # Now calculate scaling factor for shares bars (15% of total range)
+    max_shares = shares_data.max()
+    if max_shares > 0:  # Prevent division by zero
+        bar_height_range = (y_max_with_margin - y_min_with_margin) * 0.15
+        scale_factor = bar_height_range / max_shares
+        # Scale shares and add y_min to start bars from minimum
+        scaled_shares = shares_data * scale_factor + y_min_with_margin
+    else:
+        scaled_shares = shares_data + y_min_with_margin
+    
+    # Add shares bars
+    fig.add_trace(
+        go.Bar(
+            x=filtered_data.index,
+            y=scaled_shares,
+            name='Shares Owned',
+            marker=dict(
+                color='lightblue',
+                opacity=0.4,
+                line=dict(width=0)  # Remove bar borders
+            ),
+            hovertemplate='Shares: %{text:,.0f}<br>Date: %{x}<extra></extra>',
+            text=shares_data  # Original share counts for hover
+        ),
+        secondary_y=False
+    )
+    
+    # Add price line
+    fig.add_trace(
+        go.Scatter(
+            x=filtered_data.index,
+            y=price_data,
+            mode='lines',
+            name='Stock Price',
+            line=dict(color='blue')
+        ),
+        secondary_y=False
+    )
+    
+    # Add cost basis line
+    fig.add_trace(
+        go.Scatter(
+            x=filtered_data.index,
+            y=filtered_data[f'{ticker}_AvgCostBasis'],
+            mode='lines',
+            name='Average Cost Basis',
+            line=dict(color='grey')
+        ),
+        secondary_y=False
+    )
+    
+    # Add cumulative P&L line on secondary y-axis
+    pnl_data = filtered_data[f'{ticker}_CumulativePnL']
+    
+    # Remove leading zeros if they exist
+    first_nonzero = pnl_data[pnl_data != 0].index.min()
+    if pd.notna(first_nonzero):
+        pnl_data = pnl_data[first_nonzero:]
+    
+    fig.add_trace(
+        go.Scatter(
+            x=pnl_data.index,
+            y=pnl_data,
+            mode='lines',
+            name='Cumulative P&L',
+            line=dict(color='green')
+        ),
+        secondary_y=True
+    )
+    
+    # Calculate y-axis range with margin for price axis
+    y_min = min(
+        price_data.min(),
+        filtered_data[f'{ticker}_AvgCostBasis'].min()
+    )
+    y_max = max(
+        price_data.max(),
+        filtered_data[f'{ticker}_AvgCostBasis'].max()
+    )
+    y_range = y_max - y_min
+    y_margin = y_range * 0.1
+    
+    # Ensure y-axis minimum accommodates the scaled share bars
+    if max_shares > 0:
+        y_min = min(y_min, price_data.min())
+    
+    # Update layout
+    fig.update_layout(
+        title=f'{ticker} Price and P&L Analysis',
+        xaxis_title='Date',
+        yaxis_title='Price ($)',
+        yaxis2_title='Cumulative P&L ($)',
+        hovermode='x unified',
+        autosize=True,
+        height=600,
+        yaxis=dict(range=[y_min_with_margin, y_max_with_margin])
     )
     
     return fig
@@ -422,8 +577,13 @@ def main():
                 start_date, end_date = selected_dates
                 
                 try:
-                    fig = create_stock_chart(st.session_state.computed_fields, ticker, (start_date, end_date))
-                    st.plotly_chart(fig, use_container_width=True)
+                    # Create price/position chart
+                    fig1 = create_stock_chart(st.session_state.computed_fields, ticker, (start_date, end_date))
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                    # Create P&L chart
+                    fig2 = create_pnl_chart(st.session_state.computed_fields, ticker, (start_date, end_date))
+                    st.plotly_chart(fig2, use_container_width=True)
                 except Exception as e:
                     st.error(f"Error creating chart for {ticker}: {str(e)}")
             else:
