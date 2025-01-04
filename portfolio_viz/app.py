@@ -336,10 +336,10 @@ def create_pnl_chart(computedFields, ticker, date_range):
     y_min_with_margin = max(0, y_min - y_margin)
     y_max_with_margin = y_max + y_margin
     
-    # Now calculate scaling factor for shares bars (15% of total range)
+    # Now calculate scaling factor for shares bars (20% of total range)
     max_shares = shares_data.max()
     if max_shares > 0:  # Prevent division by zero
-        bar_height_range = (y_max_with_margin - y_min_with_margin) * 0.15
+        bar_height_range = (y_max_with_margin - y_min_with_margin) * 0.20
         scale_factor = bar_height_range / max_shares
         # Scale shares and add y_min to start bars from minimum
         scaled_shares = shares_data * scale_factor + y_min_with_margin
